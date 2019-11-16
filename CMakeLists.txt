@@ -8,3 +8,7 @@ find_package(OpenCV REQUIRED)
 
 add_executable(line_renderer src/main.cpp src/wu_line.hpp)
 target_link_libraries(line_renderer ${OpenCV_LIBS})
+
+if (UNIX AND NOT APPLE)
+    target_link_libraries(line_renderer pthread)
+endif ()

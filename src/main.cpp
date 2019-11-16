@@ -2,12 +2,15 @@
 #include <opencv2/highgui/highgui.hpp>
 #include <opencv2/imgproc.hpp>
 
+#include <cmath>
 #include <iostream>
 #include <random>
 #include <list>
 #include <limits>
 #include <thread>
 #include <atomic>
+#include <mutex>
+#include <condition_variable>
 
 #include "wu_line.hpp"
 
@@ -87,8 +90,7 @@ public:
     }
 
     static inline double CalculateDeviation(double a, double b) {
-        double r = a - b;
-        return r * r;
+        return std::abs(a - b);
     }
 
     inline double PreCalculatePixelValue(int x, int y, double color, double intensity) {
@@ -113,7 +115,9 @@ public:
 
     inline void DrawPixel(int x, int y, double color, double intensity) {
         result.at<double>(y, x) = PreCalculatePixelValue(x, y, color, intensity);
-        deviations_sum = PreCalculateDeviation(x, y, color, intensity);
+        auto new_sum = PreCalculateDeviation(x, y, color, intensity);
+        deviations.at<double>(y / multiplier, x / multiplier) += new_sum - deviations_sum;
+        deviations_sum = new_sum;
     }
 
     inline double PreCalculateDeviation(const Line &line, double color) {
@@ -135,7 +139,7 @@ constexpr const double pi = 3.141592653589793238462643383279502884;
 
 int main() {
     cv::Mat src = cv::imread("monro.png", cv::ImreadModes::IMREAD_GRAYSCALE);
-    cv::resize(src, src, cv::Size(128, 128));
+    cv::resize(src, src, cv::Size(64, 64));
 
     int width = 1024;
     int height = 1024;
