@@ -158,6 +158,8 @@ int main() {
 
     const size_t threads_count = std::thread::hardware_concurrency() ? std::thread::hardware_concurrency() : 4;
 
+    std::cout << "Will compute in " << threads_count << " threads" << std::endl;
+
     class Lock {
     public:
         void Wait() {
