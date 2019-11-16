@@ -4,8 +4,10 @@
 
 #include <iostream>
 #include <random>
-#include <functional>
 #include <list>
+#include <limits>
+#include <thread>
+#include <atomic>
 
 #include "wu_line.hpp"
 
@@ -132,7 +134,7 @@ public:
 constexpr const double pi = 3.141592653589793238462643383279502884;
 
 int main() {
-    cv::Mat src = cv::imread("monro.png", CV_LOAD_IMAGE_GRAYSCALE);
+    cv::Mat src = cv::imread("monro.png", cv::ImreadModes::IMREAD_GRAYSCALE);
     cv::resize(src, src, cv::Size(128, 128));
 
     int width = 1024;
@@ -154,20 +156,103 @@ int main() {
         }
     }
 
+    const size_t threads_count = std::thread::hardware_concurrency() ? std::thread::hardware_concurrency() : 4;
+
+    class Lock {
+    public:
+        void Wait() {
+            std::unique_lock lock(m);
+            unlocked = false;
+            cv.wait(lock, [&]() { return unlocked; });
+            lock.unlock();
+        }
+
+        void Wake() {
+            {
+                std::lock_guard lg(m);
+                unlocked = true;
+            }
+            cv.notify_all();
+        }
+
+        std::mutex &GetMutex() {
+            return m;
+        }
+
+    private:
+        std::mutex m;
+        std::condition_variable cv;
+        bool unlocked = false;
+    };
+
+    std::vector<Lock> worker_threads_locks(threads_count);
+    std::vector<std::pair<std::list<Line>::const_iterator, std::list<Line>::const_iterator>> worker_threads_ranges(threads_count);
+
+    Lock main_thread_lock;
+    std::mutex push_pair_mutex;
+
+    size_t busy_threads = 0;
+    std::pair<double, std::list<Line>::const_iterator> best_line;
+
+    auto push_pair = [&](const std::pair<double, std::list<Line>::const_iterator> &p) {
+        std::lock_guard lg(push_pair_mutex);
+        if (p.first < best_line.first) {
+            best_line = p;
+        }
+        {
+            const std::lock_guard<std::mutex> lock_main(main_thread_lock.GetMutex());
+            --busy_threads;
+        }
+        if (--busy_threads == 0) {
+            main_thread_lock.Wake();
+        }
+    };
+
+    auto calc = [&](size_t index) {
+        while (index < worker_threads_ranges.size()) {
+            worker_threads_locks[index].Wait();
+            auto min_deviations_sum = std::numeric_limits<double>::infinity();
+            std::list<Line>::const_iterator min_iter;
+            for (auto it = worker_threads_ranges[index].first; it != worker_threads_ranges[index].second; ++it) {
+                auto tmp_deviations_sum = a.PreCalculateDeviation(*it, 0.3);
+                if (tmp_deviations_sum < min_deviations_sum) {
+                    min_deviations_sum = tmp_deviations_sum;
+                    min_iter = it;
+                }
+            }
+            push_pair(std::pair(min_deviations_sum, min_iter));
+        }
+    };
+
+    std::vector<std::thread> worker_threads;
+    for (size_t i = 0; i < threads_count; ++i) {
+        worker_threads.emplace_back(calc, i);
+    }
+
     int lines_elapsed = 0;
     while (!lines.empty()) {
         lines_elapsed++;
-        double min_deviations_sum = 1.0 / 0.0;
-        std::list<Line>::iterator min_iter;
-        for (auto it = lines.begin(); it != lines.end(); ++it) {
-            auto tmp_deviations_sum = a.PreCalculateDeviation(*it, 0.3);
-            if (tmp_deviations_sum < min_deviations_sum) {
-                min_deviations_sum = tmp_deviations_sum;
-                min_iter = it;
-            }
+        best_line = std::pair(std::numeric_limits<double>::infinity(), std::list<Line>::const_iterator());
+        busy_threads = threads_count;
+
+        size_t per_thread_count = lines.size() / threads_count;
+        auto iter = lines.begin();
+        for (size_t i = 0; i < threads_count - 1; ++i) {
+            auto next_iter = iter;
+            std::advance(next_iter, per_thread_count);
+            worker_threads_ranges[i] = std::pair(iter, next_iter);
+            iter = next_iter;
         }
-        a.DrawLine(*min_iter, 0.0);
-        lines.erase(min_iter);
+        worker_threads_ranges[worker_threads_ranges.size() - 1] = std::pair(iter, lines.end());
+
+        for (auto &lock : worker_threads_locks) {
+            lock.Wake();
+        }
+        main_thread_lock.Wait();
+
+        a.DrawLine(*best_line.second, 0.3);
+        lines.erase(best_line.second);
+
         if (lines_elapsed % 50 == 0) {
             cv::Mat m(a.result.rows, a.result.cols, CV_8UC1);
             for (int x = 0; x < m.cols; ++x) {
@@ -178,6 +263,14 @@ int main() {
             cv::imwrite("img/" + std::to_string(lines_elapsed) + "_" + std::to_string(a.deviations_sum) + ".png", m);
             std::cout << lines_elapsed << std::endl;
         }
+    }
+
+    worker_threads_ranges.clear();
+    for (auto &lock : worker_threads_locks) {
+        lock.Wake();
+    }
+    for (auto &th : worker_threads) {
+        th.join();
     }
 
     return 0;
