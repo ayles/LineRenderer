@@ -14,14 +14,44 @@
 
 #include "wu_line.hpp"
 
+struct Point {
+    double x = 0;
+    double y = 0;
+
+    Point() {}
+    Point(double x, double y) : x(x), y(y) {}
+
+    Point(const Point &) = default;
+    Point &operator=(const Point &) = default;
+};
+
+struct Matrix {
+    int width;
+    int height;
+    std::vector<double> m;
+
+    Matrix(int width, int height, double dflt = 0.0) : width(width), height(height), m(width * height, dflt) {}
+
+    Matrix(const Matrix &) = default;
+    Matrix &operator=(const Matrix &) = default;
+
+    double *operator[](int index) {
+        return m.data() + height * index;
+    }
+
+    const double *operator[](int index) const {
+        return m.data() + height * index;
+    }
+};
+
 struct Line {
     double k;
     double A, B, C;
     double L;
     double invL;
-    cv::Point2i p1, p2;
+    Point p1, p2;
 
-    Line(const cv::Point2i &p1_, const cv::Point2i &p2_) : p1(p1_), p2(p2_) {
+    Line(const Point &p1_, const Point &p2_) : p1(p1_), p2(p2_) {
         if (std::abs(p2.x - p1.x) > std::abs(p2.y - p2.y)) {
             if (p1.x > p2.x) {
                 std::swap(p1, p2);
@@ -39,84 +69,73 @@ struct Line {
         L = std::sqrt(A * A + B * B);
         invL = 1.0 / L;
     }
-
-    inline double DistanceToPoint(double x, double y) const {
-        return std::abs(A * x + B * y + C) * invL;
-    }
-
-    inline double DistanceToPoint(const cv::Point2d &p) const {
-        return DistanceToPoint(p.x, p.y);
-    }
 };
 
 class A {
 public:
-    cv::Mat image;
-    cv::Mat result;
+    int scale;
+    double inv_scale;
 
-    int multiplier;
-
-    cv::Mat deviations;
+    Matrix result;
+    Matrix result_dwn;
+    Matrix image_dwn;
+    Matrix deviations_dwn;
     double deviations_sum;
 
-    A(cv::Mat &image_, int width, int height)
-    : image(image_.rows, image_.cols, CV_64F), result(height, width, CV_64F), deviations(image_.rows, image_.cols, CV_64F), deviations_sum(0.0) {
+    A(const Matrix &image_dwn, int width, int height)
+        : result(width, height, 0.0)
+        , result_dwn(image_dwn.width, image_dwn.height, 0.0)
+        , image_dwn(image_dwn)
+        , deviations_dwn(image_dwn.width, image_dwn.height)
+        , deviations_sum(0.0) {
         if ((width & (width - 1)) || (height & (height - 1))) {
             throw std::runtime_error("width or height is not power of 2");
         }
 
-        if ((image.cols & (image.cols - 1)) || (image.rows & (image.rows - 1))) {
+        if ((image_dwn.width & (image_dwn.width - 1)) || (image_dwn.height & (image_dwn.height - 1))) {
             throw std::runtime_error("image width or height is not power of 2");
         }
 
-        multiplier = width / image.cols;
+        scale = width / image_dwn.width;
 
-        if (multiplier != height / image.rows) {
+        if (scale != height / image_dwn.height) {
             throw std::runtime_error("width and height multipliers differ");
         }
 
-        for (int x = 0; x < image_.cols; ++x) {
-            for (int y = 0; y < image_.rows; ++y) {
-                image.at<double>(y, x) = image_.at<uchar>(y, x) / 255.0;
-            }
-        }
+        inv_scale = 1.0 / scale;
 
-        for (int x = 0; x < result.cols; ++x) {
-            for (int y = 0; y < result.rows; ++y) {
+        for (int x = 0; x < result.width; ++x) {
+            for (int y = 0; y < result.height; ++y) {
                 DrawPixel(x, y, 1, 1);
             }
-            int a = 0;
         }
     }
 
     static inline double CalculateDeviation(double a, double b) {
-        return std::abs(a - b);
+        double r = a - b;
+        return r * r;
     }
 
-    inline double PreCalculatePixelValue(int x, int y, double color, double intensity) {
-        return result.at<double>(y, x) * (1 - intensity) + color * intensity;
+    static inline double PreCalculatePixelValue(double old_color, double color, double intensity) {
+        return old_color * (1 - intensity) + color * intensity;
     }
 
     inline double PreCalculateDeviation(int x, int y, double color, double intensity) {
-        double average = -result.at<double>(y, x) + PreCalculatePixelValue(x, y, color, intensity);
-        int xl = x / multiplier * multiplier;
-        int xu = xl + multiplier;
-        int yl = y / multiplier * multiplier;
-        int yu = yl + multiplier;
-        for (int xx = xl; xx < xu; ++xx) {
-            for (int yy = yl; yy < yu; ++yy) {
-                average += result.at<double>(yy, xx);
-            }
-        }
-        average /= multiplier * multiplier;
-        return deviations_sum - deviations.at<double>(y / multiplier, x / multiplier) +
-            CalculateDeviation(average, image.at<double>(y / multiplier, x / multiplier));
+        int x_dwn = x / scale;
+        int y_dwn = y / scale;
+        double average =
+            (result_dwn[x_dwn][y_dwn] - result[x][y] + PreCalculatePixelValue(result[x][y], color, intensity)) * inv_scale * inv_scale;
+        return deviations_sum - deviations_dwn[x_dwn][y_dwn] + CalculateDeviation(average, image_dwn[x_dwn][y_dwn]);
     }
 
     inline void DrawPixel(int x, int y, double color, double intensity) {
-        result.at<double>(y, x) = PreCalculatePixelValue(x, y, color, intensity);
+        int x_dwn = x / scale;
+        int y_dwn = y / scale;
         auto new_sum = PreCalculateDeviation(x, y, color, intensity);
-        deviations.at<double>(y / multiplier, x / multiplier) += new_sum - deviations_sum;
+        result_dwn[x_dwn][y_dwn] -= result[x][y];
+        result[x][y] = PreCalculatePixelValue(result[x][y], color, intensity);
+        result_dwn[x_dwn][y_dwn] += result[x][y];
+        deviations_dwn[x_dwn][y_dwn] += new_sum - deviations_sum;
         deviations_sum = new_sum;
     }
 
@@ -137,15 +156,34 @@ public:
 
 constexpr const double pi = 3.141592653589793238462643383279502884;
 
+static inline Matrix CVToM(const cv::Mat &m) {
+    Matrix mm(m.cols, m.rows);
+    for (int x = 0; x < mm.width; ++x) {
+        for (int y = 0; y < mm.height; ++y) {
+            mm[x][y] = m.at<uchar>(y, x) / 255.0;
+        }
+    }
+    return mm;
+}
+
+static inline cv::Mat MToCV(const Matrix &m) {
+    cv::Mat mm(m.width, m.height, CV_8UC1);
+    for (int x = 0; x < m.width; ++x) {
+        for (int y = 0; y < m.height; ++y) {
+            mm.at<uchar>(y, x) = m[x][y] * 255.0;
+        }
+    }
+    return mm;
+}
+
 int main() {
     cv::Mat src = cv::imread("monro.png", cv::ImreadModes::IMREAD_GRAYSCALE);
-    cv::resize(src, src, cv::Size(64, 64));
+    cv::resize(src, src, cv::Size(128, 128));
 
     int width = 1024;
     int height = 1024;
 
-    A a(src, width, height);
-
+    A a(CVToM(src), width, height);
 
     double lines_count = 200;
     std::list<Line> lines;
@@ -155,8 +193,8 @@ int main() {
             int x = width / 2;
             int y = height / 2;
             lines.emplace_back(
-                cv::Point2i(std::cos(i / lines_count * 2 * pi) * x * 0.9 + x, std::sin(i / lines_count * 2 * pi) * y * 0.9 + y),
-                cv::Point2i(std::cos(j / lines_count * 2 * pi) * x * 0.9 + x, std::sin(j / lines_count * 2 * pi) * y * 0.9 + y));
+                Point(std::cos(i / lines_count * 2 * pi) * x * 0.9 + x, std::sin(i / lines_count * 2 * pi) * y * 0.9 + y),
+                Point(std::cos(j / lines_count * 2 * pi) * x * 0.9 + x, std::sin(j / lines_count * 2 * pi) * y * 0.9 + y));
         }
     }
 
@@ -167,16 +205,18 @@ int main() {
     class Lock {
     public:
         void Wait() {
-            std::unique_lock lock(m);
-            unlocked = false;
-            cv.wait(lock, [&]() { return unlocked; });
-            lock.unlock();
+            if (locked) {
+                std::unique_lock lock(m);
+                cv.wait(lock, [&]() { return !locked; });
+                lock.unlock();
+            }
+            locked = true;
         }
 
         void Wake() {
             {
                 std::lock_guard lg(m);
-                unlocked = true;
+                locked = false;
             }
             cv.notify_all();
         }
@@ -188,7 +228,7 @@ int main() {
     private:
         std::mutex m;
         std::condition_variable cv;
-        bool unlocked = false;
+        bool locked = true;
     };
 
     std::vector<Lock> worker_threads_locks(threads_count);
@@ -209,7 +249,7 @@ int main() {
             const std::lock_guard<std::mutex> lock_main(main_thread_lock.GetMutex());
             --busy_threads;
         }
-        if (--busy_threads == 0) {
+        if (busy_threads == 0) {
             main_thread_lock.Wake();
         }
     };
@@ -260,13 +300,7 @@ int main() {
         lines.erase(best_line.second);
 
         if (lines_elapsed % 50 == 0) {
-            cv::Mat m(a.result.rows, a.result.cols, CV_8UC1);
-            for (int x = 0; x < m.cols; ++x) {
-                for (int y = 0; y < m.rows; ++y) {
-                    m.at<uchar>(y, x) = a.result.at<double>(y, x) * 255.0;
-                }
-            }
-            cv::imwrite("img/" + std::to_string(lines_elapsed) + "_" + std::to_string(a.deviations_sum) + ".png", m);
+            cv::imwrite("img/" + std::to_string(lines_elapsed) + "_" + std::to_string(a.deviations_sum) + ".png", MToCV(a.result));
             std::cout << lines_elapsed << std::endl;
         }
     }
