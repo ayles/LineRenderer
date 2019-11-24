@@ -7,6 +7,7 @@
 
 #include <cmath>
 #include <algorithm>
+#include <functional>
 
 inline void WuDrawLine(double x0, double y0, double x1, double y1,
                 const std::function<void(int x, int y, double brightess)> &plot) {
