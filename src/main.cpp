@@ -54,21 +54,86 @@ struct Point {
     Point &operator=(const Point &) = default;
 };
 
+struct Color {
+    double r = 0;
+    double g = 0;
+    double b = 0;
+
+    Color() {}
+    Color(double r, double g, double b) : r(r), g(g), b(b) {}
+    Color(const char *c) {
+        std::string s(c);
+        auto color = s.find('#') != std::string::npos ? std::string(s.c_str() + 1) : s;
+        int clr = std::stoi(color, nullptr, 16);
+        r = (clr / 256 / 256) % 256;
+        g = (clr / 256) % 256;
+        b = clr % 256;
+        r /= 255.0;
+        g /= 255.0;
+        b /= 255.0;
+    }
+
+    Color(const Color &) = default;
+    Color &operator=(const Color &) = default;
+
+    inline Color operator-(const Color &o) const {
+        return Color(r - o.r, g - o.g, b - o.b);
+    }
+
+    inline Color &operator-=(const Color &o) {
+        r -= o.r;
+        g -= o.g;
+        b -= o.b;
+        return *this;
+    }
+
+    inline Color operator+(const Color &o) const {
+        return Color(r + o.r, g + o.g, b + o.b);
+    }
+
+    inline Color &operator+=(const Color &o) {
+        r += o.r;
+        g += o.g;
+        b += o.b;
+        return *this;
+    }
+
+    inline Color operator*(double v) const {
+        return Color(r * v, g * v, b * v);
+    }
+
+    inline Color operator/(double v) const {
+        return Color(r / v, g / v, b / v);
+    }
+
+    inline double DistanceSquared(const Color &o) const {
+        double rr = o.r - r;
+        double gg = o.g - g;
+        double bb = o.b - b;
+        return rr * rr + gg * gg + bb * bb;
+    }
+
+    inline double Distance(const Color &o) const {
+        return std::sqrt(DistanceSquared(o));
+    }
+};
+
+template<typename T>
 struct Matrix {
     int width;
     int height;
-    std::vector<double> m;
+    std::vector<T> m;
 
-    Matrix(int width, int height, double dflt = 0.0) : width(width), height(height), m(width * height, dflt) {}
+    Matrix(int width, int height, T dflt = T()) : width(width), height(height), m(width * height, dflt) {}
 
     Matrix(const Matrix &) = default;
     Matrix &operator=(const Matrix &) = default;
 
-    double *operator[](int index) {
+    T *operator[](int index) {
         return m.data() + height * index;
     }
 
-    const double *operator[](int index) const {
+    const T *operator[](int index) const {
         return m.data() + height * index;
     }
 };
@@ -79,8 +144,9 @@ struct Line {
     double L;
     double invL;
     Point p1, p2;
+    Color color;
 
-    Line(const Point &p1_, const Point &p2_) : p1(p1_), p2(p2_) {
+    Line(const Point &p1_, const Point &p2_, const Color &color) : p1(p1_), p2(p2_), color(color) {
         if (std::abs(p2.x - p1.x) > std::abs(p2.y - p2.y)) {
             if (p1.x > p2.x) {
                 std::swap(p1, p2);
@@ -112,15 +178,15 @@ public:
     int scale;
     double inv_scale;
 
-    Matrix result;
-    Matrix result_dwn;
-    Matrix image_dwn;
-    Matrix deviations_dwn;
+    Matrix<Color> result;
+    Matrix<Color> result_dwn;
+    Matrix<Color> image_dwn;
+    Matrix<double> deviations_dwn;
     double deviations_sum;
 
-    A(const Matrix &image_dwn, int width, int height)
-        : result(width, height, 0.0)
-        , result_dwn(image_dwn.width, image_dwn.height, 0.0)
+    A(const Matrix<Color> &image_dwn, int width, int height)
+        : result(width, height)
+        , result_dwn(image_dwn.width, image_dwn.height)
         , image_dwn(image_dwn)
         , deviations_dwn(image_dwn.width, image_dwn.height)
         , deviations_sum(0.0) {
@@ -142,29 +208,28 @@ public:
 
         for (int x = 0; x < result.width; ++x) {
             for (int y = 0; y < result.height; ++y) {
-                DrawPixel(x, y, 1, 1);
+                DrawPixel(x, y, Color(1, 1, 1), 1);
             }
         }
     }
 
-    static inline double CalculateDeviation(double goal, double current) {
-        double r = goal - current;
-        return r * r;
+    static inline double CalculateDeviation(const Color &goal, const Color &current) {
+        return goal.DistanceSquared(current);
     }
 
-    static inline double PreCalculatePixelValue(double old_color, double color, double intensity) {
+    static inline Color PreCalculatePixelValue(const Color &old_color, const Color &color, double intensity) {
         return old_color * (1 - intensity) + color * intensity;
     }
 
-    inline double PreCalculateDeviation(int x, int y, double color, double intensity) {
+    inline double PreCalculateDeviation(int x, int y, const Color &color, double intensity) {
         int x_dwn = x / scale;
         int y_dwn = y / scale;
-        double average =
+        Color average =
             (result_dwn[x_dwn][y_dwn] - result[x][y] + PreCalculatePixelValue(result[x][y], color, intensity)) * inv_scale * inv_scale;
         return deviations_sum - deviations_dwn[x_dwn][y_dwn] + CalculateDeviation(image_dwn[x_dwn][y_dwn], average);
     }
 
-    inline void DrawPixel(int x, int y, double color, double intensity) {
+    inline void DrawPixel(int x, int y, const Color &color, double intensity) {
         int x_dwn = x / scale;
         int y_dwn = y / scale;
         auto new_sum = PreCalculateDeviation(x, y, color, intensity);
@@ -175,50 +240,56 @@ public:
         deviations_sum = new_sum;
     }
 
-    inline double PreCalculateDeviation(const Line &line, double color) {
+    inline double PreCalculateDeviation(const Line &line, double intensity_) {
         double temp_deviations_sum = deviations_sum;
         WuDrawLine(line.p1.x, line.p1.y, line.p2.x, line.p2.y, [&](int x, int y, double intensity) {
-             temp_deviations_sum += PreCalculateDeviation(x, y, color, intensity) - deviations_sum;
+             temp_deviations_sum += PreCalculateDeviation(x, y, line.color, intensity * intensity_) - deviations_sum;
         });
         return temp_deviations_sum;
     }
 
-    inline void DrawLine(const Line &line, double color) {
+    inline void DrawLine(const Line &line, double intensity_) {
         WuDrawLine(line.p1.x, line.p1.y, line.p2.x, line.p2.y, [&](int x, int y, double intensity) {
-            DrawPixel(x, y, color, intensity);
+            DrawPixel(x, y, line.color, intensity * intensity_);
         });
     }
 };
 
 constexpr const double pi = 3.141592653589793238462643383279502884;
 
-inline Matrix CVToM(const cv::Mat &m) {
-    Matrix mm(m.cols, m.rows);
+inline Matrix<Color> CVToM(const cv::Mat &m) {
+    Matrix<Color> mm(m.cols, m.rows);
     for (int x = 0; x < mm.width; ++x) {
         for (int y = 0; y < mm.height; ++y) {
-            mm[x][y] = m.at<uchar>(y, x) / 255.0;
+            auto &a = m.at<cv::Vec3b>(y, x);
+            mm[x][y] = Color(a[2], a[1], a[0]) * (1 / 255.0);
         }
     }
     return mm;
 }
 
-inline cv::Mat MToCV(const Matrix &m) {
-    cv::Mat mm(m.width, m.height, CV_8UC1);
+inline cv::Mat MToCV(const Matrix<Color> &m) {
+    cv::Mat mm(m.height, m.width, CV_8UC3);
     for (int x = 0; x < m.width; ++x) {
         for (int y = 0; y < m.height; ++y) {
-            mm.at<uchar>(y, x) = m[x][y] * 255.0;
+            mm.at<cv::Vec3b>(y, x) = cv::Vec3b(m[x][y].b * 255.0, m[x][y].g * 255.0, m[x][y].r * 255.0);
         }
     }
     return mm;
 }
 
-inline std::list<Line> GenerateLinesSimple(const Point &center, double radius, int count) {
+inline std::list<Line> GenerateLinesSimple(const Point &center, double radius, int count, const std::vector<Color> &colors) {
     std::list<Line> lines;
     for (int i = 0; i < count; ++i) {
         for (int j = i + 1; j < count; ++j) {
-            lines.emplace_back(
-                Point(std::cos(i * 2 * pi / count) * radius + center.x, std::sin(i * 2 * pi / count) * radius + center.y),
-                Point(std::cos(j * 2 * pi / count) * radius + center.x, std::sin(j * 2 * pi / count) * radius + center.y));
+            for (auto &color : colors) {
+                lines.emplace_back(
+                    Point(std::cos(i * 2 * pi / count) * radius + center.x,
+                          std::sin(i * 2 * pi / count) * radius + center.y),
+                    Point(std::cos(j * 2 * pi / count) * radius + center.x,
+                          std::sin(j * 2 * pi / count) * radius + center.y),
+                    color);
+            }
         }
     }
     return lines;
@@ -233,15 +304,18 @@ inline std::list<std::pair<double, Line>> MakeWeightedLinesList(const std::list<
 }
 
 int main() {
-    cv::Mat src = cv::imread("monro.png", cv::ImreadModes::IMREAD_GRAYSCALE);
-    cv::resize(src, src, cv::Size(256, 256));
+    cv::Mat src = cv::imread("menhera.jpg", cv::ImreadModes::IMREAD_COLOR);
+    cv::resize(src, src, cv::Size(128, 128));
 
-    int width = 2048;
-    int height = 2048;
+    int width = 1024;
+    int height = 1024;
+
+    double line_intensity = 0.5;
 
     A a(CVToM(src), width, height);
 
-    auto lines = MakeWeightedLinesList(GenerateLinesSimple(Point(width / 2, height / 2), width * 0.45, 200));
+    auto lines = MakeWeightedLinesList(GenerateLinesSimple(Point(width / 2, height / 2), width * 0.45, 200,
+        std::vector<Color> { "715c63", "494554", "fcf6e6", "3b212a", "1d1516" }));
 
     const size_t threads_count = std::thread::hardware_concurrency() ? std::thread::hardware_concurrency() : 4;
 
@@ -278,7 +352,7 @@ int main() {
             }
             auto min_iter = worker_threads_ranges[index].first;
             for (auto it = worker_threads_ranges[index].first; it != worker_threads_ranges[index].second; ++it) {
-                it->first = a.PreCalculateDeviation(it->second, 0.1);
+                it->first = a.PreCalculateDeviation(it->second, line_intensity);
                 if (it->first < min_iter->first) {
                     min_iter = it;
                 }
@@ -331,7 +405,7 @@ int main() {
 
         main_thread_lock.Wait();
 
-        a.DrawLine(best_line->second, 0.1);
+        a.DrawLine(best_line->second, line_intensity);
         lines.erase(best_line);
         lines.sort();
 
