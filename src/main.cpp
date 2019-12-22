@@ -11,258 +11,281 @@
 #include <atomic>
 #include <mutex>
 #include <condition_variable>
+#include <functional>
+#include <cfenv>
 
 #include "utils.hpp"
 #include "wu_line.hpp"
 
-#ifdef __GNUC__
-#define INLINE __attribute__((always_inline))
-#else
-#define INLINE inline
-#endif
-
-struct Point {
-    double x = 0;
-    double y = 0;
-
-    Point() {}
-    Point(double x, double y) : x(x), y(y) {}
-
-    Point(const Point &) = default;
-    Point &operator=(const Point &) = default;
-};
-
-struct Color {
-    double r = 0;
-    double g = 0;
-    double b = 0;
-
-    Color() {}
-    Color(double r, double g, double b) : r(r), g(g), b(b) {}
-    Color(const char *c) {
-        std::string s(c);
-        auto color = s.find('#') != std::string::npos ? std::string(s.c_str() + 1) : s;
-        int clr = std::stoi(color, nullptr, 16);
-        r = (clr / 256 / 256) % 256;
-        g = (clr / 256) % 256;
-        b = clr % 256;
-        r /= 255.0;
-        g /= 255.0;
-        b /= 255.0;
-    }
-
-    Color(const Color &) = default;
-    Color &operator=(const Color &) = default;
-
-    INLINE Color operator-(const Color &o) const {
-        return Color(r - o.r, g - o.g, b - o.b);
-    }
-
-    INLINE Color &operator-=(const Color &o) {
-        r -= o.r;
-        g -= o.g;
-        b -= o.b;
-        return *this;
-    }
-
-    INLINE Color operator+(const Color &o) const {
-        return Color(r + o.r, g + o.g, b + o.b);
-    }
-
-    INLINE Color &operator+=(const Color &o) {
-        r += o.r;
-        g += o.g;
-        b += o.b;
-        return *this;
-    }
-
-    INLINE Color operator*(double v) const {
-        return Color(r * v, g * v, b * v);
-    }
-
-    INLINE Color operator/(double v) const {
-        return Color(r / v, g / v, b / v);
-    }
-
-    INLINE double DistanceSquared(const Color &o) const {
-        long rmean = (long(r * 255) + long(o.r * 255)) / 2;
-        long rl = long((r - o.r) * 255);
-        long gl = long((g - o.g) * 255);
-        long bl = long((b - o.b) * 255);
-        return (((512 + rmean) * rl * rl) >> 8) + 4 * gl * gl + (((767 - rmean) * bl * bl) >> 8);
-    }
-
-    INLINE double Distance(const Color &o) const {
-        return std::sqrt(DistanceSquared(o));
-    }
-};
-
-template<typename T>
-struct Matrix {
-    int width;
-    int height;
-    std::vector<T> m;
-
-    Matrix(int width, int height, T dflt = T()) : width(width), height(height), m(width * height, dflt) {}
-
-    Matrix(const Matrix &) = default;
-    Matrix &operator=(const Matrix &) = default;
-
-    INLINE T *operator[](int index) {
-        return m.data() + height * index;
-    }
-
-    INLINE const T *operator[](int index) const {
-        return m.data() + height * index;
-    }
-};
-
-struct Line {
-    double k;
-    double A, B, C;
-    double L;
-    double invL;
-    Point p1, p2;
-    Color color;
-
-    Line(const Point &p1_, const Point &p2_, const Color &color) : p1(p1_), p2(p2_), color(color) {
-        if (std::abs(p2.x - p1.x) > std::abs(p2.y - p2.y)) {
-            if (p1.x > p2.x) {
-                std::swap(p1, p2);
-            }
-        } else {
-            if (p1.y > p2.y) {
-                std::swap(p1, p2);
-            }
-        }
-
-        A = p1.y - p2.y;
-        B = p2.x - p1.x;
-        C = p1.x * p2.y - p2.x * p1.y;
-        k = - A / B;
-        L = std::sqrt(A * A + B * B);
-        invL = 1.0 / L;
-    }
-
-    bool operator<(const Line &other) const {
-        if (p1.x != other.p1.x) return p1.x < other.p1.x;
-        if (p2.x != other.p2.x) return p2.x < other.p2.x;
-        if (p1.y != other.p1.y) return p1.y < other.p1.y;
-        return p2.y < other.p2.y;
-    }
-};
+constexpr const double pi = 3.141592653589793238462643383279502884;
 
 class A {
 public:
-    int scale;
-    double inv_scale;
+    cv::Mat image;
+    cv::Mat image_dwn;
+    cv::Mat image_grayscale_dwn;
+    cv::Mat details_dwn;
+    cv::Mat result;
+    cv::Mat result_dwn;
+    cv::Mat deviations_dwn;
 
-    Matrix<Color> result;
-    Matrix<Color> result_dwn;
-    Matrix<Color> image_dwn;
-    Matrix<double> details_dwn;
-    Matrix<double> deviations_dwn;
+    int dwn_factor;
+    double dwn_factor_inv;
     double deviations_sum;
 
-    A(const Matrix<Color> &image_dwn, const Matrix<double> &details_dwn, int width, int height)
-        : result(width, height)
-        , result_dwn(image_dwn.width, image_dwn.height)
-        , image_dwn(image_dwn)
-        , details_dwn(details_dwn)
-        , deviations_dwn(image_dwn.width, image_dwn.height)
-        , deviations_sum(0.0) {
+public:
+    // =============== This section can be adjusted to change behaviour ============= //
+    INLINE void CalculatePotential(double& dst, double src, double distance_squared) const {
+        dst += src * 1 / (std::sqrt(distance_squared) * 30 + 15);
+    }
+
+    INLINE double CalculateDetail(double potential) const {
+        return potential * potential * potential * potential * potential * potential;
+    }
+
+    INLINE double CalculateDeviation(const cv::Vec3d &goal, const cv::Vec3d &current, double potential = 1.0) const {
+        return lr::Color::DistanceSquared(goal, current) * CalculateDetail(potential);
+    }
+
+    INLINE double GetLineIntensity() const {
+        return 0.3;
+    }
+
+    INLINE bool ShouldDeleteLineAfterDraw() const {
+        return false;
+    }
+    ///////////////////////////////////////////////////////////////////////////////////
+
+    void CalculateDetailsMatrix() {
+        cv::Mat m;
+        image_grayscale_dwn.convertTo(m, CV_64FC1);
+        cv::Sobel(m, m, CV_64F, 1, 0);
+        cv::Sobel(m, m, CV_64F, 0, 1);
+        m = cv::abs(m);
+        details_dwn = cv::Mat(m.rows, m.cols, CV_64FC1);
+
+        double mx = 0.0;
+        for (size_t r = 0; r < details_dwn.rows; ++r) {
+            for (size_t c = 0; c < details_dwn.cols; ++c) {
+                for (size_t rr = 0; rr < m.rows; ++rr) {
+                    for (size_t cc = 0; cc < m.cols; ++cc) {
+                        double ccc = double(cc) - c;
+                        double rrr = double(rr) - r;
+                        double distance_squared = ccc * ccc + rrr * rrr;
+                        CalculatePotential(details_dwn.at<double>(r, c), m.at<double>(rr, cc), distance_squared);
+                        mx = std::max(details_dwn.at<double>(r, c), mx);
+                    }
+                }
+            }
+        }
+
+        double mx_inv = 1.0 / mx;
+        details_dwn *= mx_inv;
+    }
+
+    A(const cv::Mat& image_, int dwn_width, int dwn_height, int width, int height)
+        : result(cv::Size(width, height), CV_64FC3, cv::Scalar(0, 0, 0))
+        , result_dwn(cv::Size(dwn_width, dwn_height), CV_64FC3, cv::Scalar(0, 0, 0))
+        , deviations_dwn(cv::Size(dwn_width, dwn_height), CV_64FC1, 0.0)
+        , deviations_sum(0.0)
+    {
         if ((width & (width - 1)) || (height & (height - 1))) {
             throw std::runtime_error("width or height is not power of 2");
         }
 
-        if ((image_dwn.width & (image_dwn.width - 1)) || (image_dwn.height & (image_dwn.height - 1))) {
+        if ((dwn_width & (dwn_width - 1)) || (dwn_height & (dwn_height - 1))) {
             throw std::runtime_error("image width or height is not power of 2");
         }
 
-        scale = width / image_dwn.width;
+        dwn_factor = width / dwn_width;
 
-        if (scale != height / image_dwn.height) {
+        if (dwn_factor != height / dwn_height) {
             throw std::runtime_error("width and height multipliers differ");
         }
 
-        inv_scale = 1.0 / scale;
+        dwn_factor_inv = 1.0 / dwn_factor;
 
-        for (int x = 0; x < result.width; ++x) {
-            for (int y = 0; y < result.height; ++y) {
-                DrawPixel(x, y, Color(1, 1, 1), 1);
+        cv::cvtColor(image_, image, cv::ColorConversionCodes::COLOR_BGR2RGB);
+        image.convertTo(image, CV_64FC3, 1 / 255.0);
+        cv::resize(image, image, cv::Size(width, height));
+        cv::resize(image, image_dwn, cv::Size(dwn_width, dwn_height));
+        image_dwn.convertTo(image_grayscale_dwn, CV_32FC3);
+        cv::cvtColor(image_grayscale_dwn, image_grayscale_dwn, cv::ColorConversionCodes::COLOR_RGB2GRAY);
+        image_grayscale_dwn.convertTo(image_grayscale_dwn, CV_64FC3);
+
+        CalculateDetailsMatrix();
+
+        for (int x = 0; x < result.cols; ++x) {
+            for (int y = 0; y < result.rows; ++y) {
+                DrawPixel(cv::Point(x, y), cv::Vec3d(1, 1, 1), 1);
             }
         }
     }
 
-    static INLINE double CalculateDeviation(const Color &goal, const Color &current, double factor = 1.0) {
-        // deviation formula
-        return goal.DistanceSquared(current) * factor * factor * factor * factor * factor * factor;
-    }
-
-    static INLINE Color PreCalculatePixelValue(const Color &old_color, const Color &color, double intensity) {
+    static INLINE cv::Vec3d PreCalculatePixelValue(const cv::Vec3d &old_color, const cv::Vec3d &color, double intensity) {
         return old_color * (1 - intensity) + color * intensity;
     }
 
-    INLINE double PreCalculateDeviation(int x, int y, const Color &color, double intensity) {
-        int x_dwn = x / scale;
-        int y_dwn = y / scale;
-        Color average =
-            (result_dwn[x_dwn][y_dwn] - result[x][y] + PreCalculatePixelValue(result[x][y], color, intensity)) * inv_scale * inv_scale;
-        return deviations_sum - deviations_dwn[x_dwn][y_dwn] + CalculateDeviation(image_dwn[x_dwn][y_dwn], average, details_dwn[x_dwn][y_dwn]);
+    INLINE double PreCalculateDeviation(const cv::Point& p, const cv::Vec3d &color, double intensity) {
+        cv::Point p_dwn = p / dwn_factor;
+        cv::Vec3d average =
+            (result_dwn.at<cv::Vec3d>(p_dwn) - result.at<cv::Vec3d>(p) + PreCalculatePixelValue(result.at<cv::Vec3d>(p), color, intensity)) * dwn_factor_inv * dwn_factor_inv;
+        return deviations_sum - deviations_dwn.at<double>(p_dwn) + CalculateDeviation(image_dwn.at<cv::Vec3d>(p_dwn), average, details_dwn.at<double>(p_dwn));
     }
 
-    INLINE void DrawPixel(int x, int y, const Color &color, double intensity) {
-        int x_dwn = x / scale;
-        int y_dwn = y / scale;
-        auto new_sum = PreCalculateDeviation(x, y, color, intensity);
-        result_dwn[x_dwn][y_dwn] -= result[x][y];
-        result[x][y] = PreCalculatePixelValue(result[x][y], color, intensity);
-        result_dwn[x_dwn][y_dwn] += result[x][y];
-        deviations_dwn[x_dwn][y_dwn] += new_sum - deviations_sum;
+    INLINE void DrawPixel(const cv::Point& p, const cv::Vec3d &color, double intensity) {
+        cv::Point p_dwn = p / dwn_factor;
+        auto new_sum = PreCalculateDeviation(p, color, intensity);
+        result_dwn.at<cv::Vec3d>(p_dwn) -= result.at<cv::Vec3d>(p);
+        result.at<cv::Vec3d>(p) = PreCalculatePixelValue(result.at<cv::Vec3d>(p), color, intensity);
+        result_dwn.at<cv::Vec3d>(p_dwn) += result.at<cv::Vec3d>(p);
+        deviations_dwn.at<double>(p_dwn) += new_sum - deviations_sum;
         deviations_sum = new_sum;
     }
 
-    INLINE double PreCalculateDeviation(const Line &line, double intensity_) {
+    INLINE double PreCalculateDeviation(const lr::Line &line, const cv::Vec3d& color) {
         double temp_deviations_sum = deviations_sum;
         WuDrawLine(line.p1.x, line.p1.y, line.p2.x, line.p2.y, [&](int x, int y, double intensity) {
-             temp_deviations_sum += PreCalculateDeviation(x, y, line.color, intensity * intensity_) - deviations_sum;
+             temp_deviations_sum += PreCalculateDeviation(cv::Point(x, y), color, intensity * GetLineIntensity()) - deviations_sum;
         });
         return temp_deviations_sum;
     }
 
-    INLINE void DrawLine(const Line &line, double intensity_) {
+    INLINE void DrawLine(const lr::Line &line, const cv::Vec3d& color) {
         WuDrawLine(line.p1.x, line.p1.y, line.p2.x, line.p2.y, [&](int x, int y, double intensity) {
-            DrawPixel(x, y, line.color, intensity * intensity_);
+            DrawPixel(cv::Point(x, y), color, intensity * GetLineIntensity());
         });
+    }
+
+    void Generate(const std::list<lr::Line>& lines, const std::vector<cv::Vec3d>& colors, const std::function<void(const A&, size_t)>& callback) {
+        struct LineExt {
+            lr::Line line;
+            double deviation;
+            cv::Vec3b color;
+
+            bool operator<(const LineExt& other) const {
+                if (deviation != other.deviation) return deviation < other.deviation;
+                return line < other.line;
+            }
+        };
+
+        std::list<LineExt> lines_ext;
+        for (auto& line : lines) {
+            for (auto& color : colors) {
+                lines_ext.emplace_back(LineExt { line, std::numeric_limits<double>::infinity(), color });
+            }
+        }
+
+        const size_t threads_count = std::thread::hardware_concurrency() ? std::thread::hardware_concurrency() : 4;
+
+        std::cout << "Will compute in " << threads_count << " threads" << std::endl;
+
+        std::vector<lr::Locker> worker_threads_locks(threads_count);
+        std::vector<std::pair<decltype(lines_ext)::iterator, decltype(lines_ext)::iterator>> worker_threads_ranges(threads_count);
+
+        lr::Locker main_thread_lock;
+        std::mutex push_pair_mutex;
+
+        size_t busy_threads = 0;
+        decltype(lines_ext)::iterator best_line;
+
+        auto push_line = [&](decltype(lines_ext)::iterator &p) {
+            std::lock_guard lg(push_pair_mutex);
+            if (p->deviation < best_line->deviation) {
+                best_line = p;
+            }
+            {
+                const std::lock_guard<std::mutex> lock_main(main_thread_lock.GetMutex());
+                --busy_threads;
+            }
+            if (busy_threads == 0) {
+                main_thread_lock.Wake();
+            }
+        };
+
+        auto calc = [&](size_t index) {
+            while (index < worker_threads_ranges.size()) {
+                worker_threads_locks[index].Wait();
+                if (index >= worker_threads_ranges.size()) {
+                    break;
+                }
+                auto min_iter = worker_threads_ranges[index].first;
+                for (auto it = worker_threads_ranges[index].first; it != worker_threads_ranges[index].second; ++it) {
+                    it->deviation = PreCalculateDeviation(it->line, it->color);
+                    if (it->deviation < min_iter->deviation) {
+                        min_iter = it;
+                    }
+                }
+                push_line(min_iter);
+            }
+        };
+
+        std::vector<std::thread> worker_threads;
+        for (size_t i = 0; i < threads_count; ++i) {
+            worker_threads.emplace_back(calc, i);
+        }
+
+        int lines_elapsed = 0;
+        while (!lines_ext.empty()) {
+            best_line = lines_ext.begin();
+            busy_threads = threads_count;
+
+            bool full_step = lines_elapsed % 10 == 0;
+
+            if (full_step) {
+                // Do full step
+                size_t per_thread_count = lines_ext.size() / threads_count;
+                auto iter = lines_ext.begin();
+                for (size_t i = 0; i < threads_count - 1; ++i) {
+                    auto next_iter = iter;
+                    std::advance(next_iter, per_thread_count);
+                    worker_threads_ranges[i] = std::pair(iter, next_iter);
+                    iter = next_iter;
+                }
+                worker_threads_ranges[worker_threads_ranges.size() - 1] = std::pair(iter, lines_ext.end());
+            } else {
+                // Do partial step
+                size_t per_thread_count = std::min(lines_ext.size() / threads_count, 200 / threads_count);
+
+                auto iter = lines_ext.begin();
+                for (size_t i = 0; i < threads_count; ++i) {
+                    auto next_iter = iter;
+                    std::advance(next_iter, per_thread_count);
+                    worker_threads_ranges[i] = std::pair(iter, next_iter);
+                    iter = next_iter;
+                }
+            }
+
+            lines_elapsed++;
+
+            for (auto &lock : worker_threads_locks) {
+                lock.Wake();
+            }
+
+            main_thread_lock.Wait();
+
+            DrawLine(best_line->line, best_line->color);
+            if (ShouldDeleteLineAfterDraw()) {
+                lines_ext.erase(best_line);
+            }
+            lines_ext.sort();
+
+            callback(*this, lines_elapsed);
+        }
+
+        worker_threads_ranges.clear();
+        for (auto &lock : worker_threads_locks) {
+            lock.Wake();
+        }
+        for (auto &th : worker_threads) {
+            th.join();
+        }
     }
 };
 
-constexpr const double pi = 3.141592653589793238462643383279502884;
-
-Matrix<Color> CVToM(const cv::Mat &m) {
-    Matrix<Color> mm(m.cols, m.rows);
-    for (int x = 0; x < mm.width; ++x) {
-        for (int y = 0; y < mm.height; ++y) {
-            auto &a = m.at<cv::Vec3b>(y, x);
-            mm[x][y] = Color(a[2], a[1], a[0]) * (1 / 255.0);
-        }
-    }
-    return mm;
-}
-
-cv::Mat MToCV(const Matrix<Color> &m) {
-    cv::Mat mm(m.height, m.width, CV_8UC3);
-    for (int x = 0; x < m.width; ++x) {
-        for (int y = 0; y < m.height; ++y) {
-            mm.at<cv::Vec3b>(y, x) = cv::Vec3b(m[x][y].b * 255.0, m[x][y].g * 255.0, m[x][y].r * 255.0);
-        }
-    }
-    return mm;
-}
-
-inline std::list<Line> GenerateLinesRandom(const Point &center, double radius, int count, const std::vector<Color> &colors) {
-    std::list<Line> lines;
-    std::vector<Point> points;
+inline std::list<lr::Line> GenerateLinesRandom(const cv::Point &center, double radius, int count) {
+    std::list<lr::Line> lines;
+    std::vector<cv::Point> points;
     double epsilon = 0;
     for (int i = 0; i < count; ++i) {
         epsilon = 0.00008 * (rand() % 101);
@@ -270,206 +293,92 @@ inline std::list<Line> GenerateLinesRandom(const Point &center, double radius, i
     }
     for (int i = 0; i < count; ++i) {
         for (int j = i + 1; j < count; ++j) {
-            for(auto &color : colors) {
-                lines.emplace_back(points[i], points[j], color);
-            }
+            lines.emplace_back(points[i], points[j]);
         }
     }
     return lines;
 }
 
-std::list<Line> GenerateLinesSimple(const Point &center, double radius, int count, const std::vector<Color> &colors) {
-    std::list<Line> lines;
+std::list<lr::Line> GenerateLinesSimple(const cv::Point &center, double radius, int count) {
+    std::list<lr::Line> lines;
     for (int i = 0; i < count; ++i) {
         for (int j = i + 1; j < count; ++j) {
-            for (auto &color : colors) {
-                lines.emplace_back(
-                    Point(std::cos(i * 2 * pi / count) * radius + center.x,
-                          std::sin(i * 2 * pi / count) * radius + center.y),
-                    Point(std::cos(j * 2 * pi / count) * radius + center.x,
-                          std::sin(j * 2 * pi / count) * radius + center.y),
-                    color);
-            }
+            lines.emplace_back(
+                cv::Point(std::cos(i * 2 * pi / count) * radius + center.x,
+                      std::sin(i * 2 * pi / count) * radius + center.y),
+                cv::Point(std::cos(j * 2 * pi / count) * radius + center.x,
+                      std::sin(j * 2 * pi / count) * radius + center.y));
         }
     }
     return lines;
 }
 
-std::list<std::pair<double, Line>> MakeWeightedLinesList(const std::list<Line> &lines) {
-    std::list<std::pair<double, Line>> lines_weighted;
-    for (auto &l : lines) {
-        lines_weighted.emplace_back(std::numeric_limits<double>::infinity(), l);
+cv::Mat combine(std::vector<cv::Mat> mats) {
+    auto cvt = [](const cv::Mat& m) {
+        cv::Mat r;
+        // Now works only with grayscale images, but we have CV_64FC3 images - RGB. Should convert all images to RGB
+        // Use cv::cvtColor to convert RGB to grayscale and m.depth(), m.channels() to check is it should be converted or its already ok
+        m.convertTo(r, CV_64FC1);
+        // Do not resize and just pack it as is
+        cv::resize(r, r, cv::Size(256, 256), 0, 0, cv::InterpolationFlags::INTER_NEAREST);
+        return r;
+    };
+
+    size_t width = 0;
+    for (auto& m : mats) {
+        m = cvt(m);
+        width += m.cols;
     }
-    return lines_weighted;
+
+    cv::Mat mmm(mats[0].rows, width, mats[0].type());
+    size_t curr_width = 0;
+    for (auto& m : mats) {
+        m.copyTo(mmm(cv::Rect(curr_width, 0, m.cols, m.rows)));
+        curr_width += m.cols;
+    }
+
+    return mmm;
 }
 
 int main() {
     cv::Mat src = cv::imread("monro_orig.jpg", cv::ImreadModes::IMREAD_COLOR);
-    cv::resize(src, src, cv::Size(128, 128));
 
-    cv::Mat src_grayscale;
-    cv::cvtColor(src, src_grayscale, cv::ColorConversionCodes::COLOR_BGR2GRAY);
-    cv::Mat m;
-    src_grayscale.convertTo(m, CV_64F);
-    cv::Sobel(m, m, CV_64F, 1, 0);
-    cv::Sobel(m, m, CV_64F, 0, 1);
-    cv::Mat potential(m.rows, m.cols, CV_64F, 0.0);
-    for (size_t r = 0; r < potential.rows; ++r) {
-        for (size_t c = 0; c < potential.cols; ++c) {
-            m.at<double>(r, c) = std::abs(m.at<double>(r, c));
-        }
-    }
-
-    double mx = 0.0;
-    for (size_t r = 0; r < potential.rows; ++r) {
-        for (size_t c = 0; c < potential.cols; ++c) {
-            for (size_t rr = 0; rr < m.rows; ++rr) {
-                for (size_t cc = 0; cc < m.cols; ++cc) {
-                    //if (r == rr && c == cc) continue;
-                    double ccc = double(cc) - c;
-                    double rrr = double(rr) - r;
-                    double d = std::sqrt(ccc * ccc + rrr * rrr);
-                    double& mm = m.at<double>(rr, cc);
-                    double& pp = potential.at<double>(r, c);
-                    // details formula
-                    pp += mm * 1 / (d * 30 + 15);
-                    mx = std::max(pp, mx);
-                }
-            }
-        }
-    }
-
-    Matrix<double> details(potential.cols, potential.rows, 0.0);
-    for (size_t r = 0; r < potential.rows; ++r) {
-        for (size_t c = 0; c < potential.cols; ++c) {
-            potential.at<double>(r, c) *= 255.0 / mx;
-            details[c][r] = potential.at<double>(r, c) / 255.0;
-        }
-    }
-
-    /*potential.convertTo(src_grayscale, CV_8UC1);
-    cv::namedWindow("win");
-    cv::imshow("win", src_grayscale);
-    m.convertTo(src_grayscale, CV_8UC1);
-    cv::namedWindow("win2");
-    cv::imshow("win2", src_grayscale);
-    cv::waitKey(0);*/
+    int dwn_width = 128;
+    int dwn_height = 128;
 
     int width = 1024;
     int height = 1024;
 
-    double line_intensity = 0.5;
+    A a(src, dwn_width, dwn_height, width, height);
 
-    A a(CVToM(src), details, width, height);
-
-    auto lines = MakeWeightedLinesList(GenerateLinesRandom(Point(width / 2, height / 2), width * 0.45, 200,
-        std::vector<Color> { "ffffff", "000000" }));
-
-    const size_t threads_count = std::thread::hardware_concurrency() ? std::thread::hardware_concurrency() : 4;
-
-    std::cout << "Will compute in " << threads_count << " threads" << std::endl;
-
-    std::vector<lr::Locker> worker_threads_locks(threads_count);
-    std::vector<std::pair<decltype(lines)::iterator, decltype(lines)::iterator>> worker_threads_ranges(threads_count);
-
-    lr::Locker main_thread_lock;
-    std::mutex push_pair_mutex;
-
-    size_t busy_threads = 0;
-    decltype(lines)::iterator best_line;
-
-    auto push_line = [&](decltype(lines)::iterator &p) {
-        std::lock_guard lg(push_pair_mutex);
-        if (p->first < best_line->first) {
-            best_line = p;
-        }
-        {
-            const std::lock_guard<std::mutex> lock_main(main_thread_lock.GetMutex());
-            --busy_threads;
-        }
-        if (busy_threads == 0) {
-            main_thread_lock.Wake();
-        }
+    auto lines = GenerateLinesRandom(cv::Point(width / 2, height / 2), width * 0.45, 200);
+    auto colors = std::vector<cv::Vec3d> { lr::Color::FromWeb("ffffff"), lr::Color::FromWeb("000000"), //"f6beb6", "d9ac75", "cd5459", "3d5e99", "7c902d",
+                                 //"ff2c36", "ffc5bd", "ef972f", "3066ef", "3bb70b"
     };
 
-    auto calc = [&](size_t index) {
-        while (index < worker_threads_ranges.size()) {
-            worker_threads_locks[index].Wait();
-            if (index >= worker_threads_ranges.size()) {
-                break;
+    cv::namedWindow("w");
+
+    a.Generate(lines, colors, [](const A& a, size_t n) {
+        if (n % 5 == 0) {
+            cv::Mat m = a.result;
+
+            if (n % 50 == 0) {
+                cv::imwrite("img/" + std::to_string(n) + "_" + std::to_string(a.deviations_sum) + ".png", m);
+                std::cout << n << std::endl;
             }
-            auto min_iter = worker_threads_ranges[index].first;
-            for (auto it = worker_threads_ranges[index].first; it != worker_threads_ranges[index].second; ++it) {
-                it->first = a.PreCalculateDeviation(it->second, line_intensity);
-                if (it->first < min_iter->first) {
-                    min_iter = it;
-                }
-            }
-            push_line(min_iter);
+
+            // Here 'a' contains many matrices of different types (RGB or grayscale double floating point)
+            // a.details_dwn - details float matrix downscaled
+            // a.deviations_dwn - deviations float matrix downscaled
+            // a.result and a.result_downscaled rgb matrices and so on
+            // combine should combine passed matrices and return one big matrix containing all them packed
+            // before combining they should all be converted from grayscale to rgb (if needed)
+            cv::imshow("w", combine({ a.details_dwn, a.deviations_dwn }));
+            // this line is for realtime drawing process debug
+            // cv::imshow("w", a.result);
+            cv::waitKey(1);
         }
-    };
-
-    std::vector<std::thread> worker_threads;
-    for (size_t i = 0; i < threads_count; ++i) {
-        worker_threads.emplace_back(calc, i);
-    }
-
-    int lines_elapsed = 0;
-    while (!lines.empty()) {
-        best_line = lines.begin();
-        busy_threads = threads_count;
-
-        bool full_step = lines_elapsed % 10 == 0;
-
-        if (full_step) {
-            // Do full step
-            size_t per_thread_count = lines.size() / threads_count;
-            auto iter = lines.begin();
-            for (size_t i = 0; i < threads_count - 1; ++i) {
-                auto next_iter = iter;
-                std::advance(next_iter, per_thread_count);
-                worker_threads_ranges[i] = std::pair(iter, next_iter);
-                iter = next_iter;
-            }
-            worker_threads_ranges[worker_threads_ranges.size() - 1] = std::pair(iter, lines.end());
-        } else {
-            // Do partial step
-            size_t per_thread_count = std::min(lines.size() / threads_count, 200 / threads_count);
-
-            auto iter = lines.begin();
-            for (size_t i = 0; i < threads_count; ++i) {
-                auto next_iter = iter;
-                std::advance(next_iter, per_thread_count);
-                worker_threads_ranges[i] = std::pair(iter, next_iter);
-                iter = next_iter;
-            }
-        }
-
-        lines_elapsed++;
-
-        for (auto &lock : worker_threads_locks) {
-            lock.Wake();
-        }
-
-        main_thread_lock.Wait();
-
-        a.DrawLine(best_line->second, line_intensity);
-        lines.erase(best_line);
-        lines.sort();
-
-        if (lines_elapsed % 50 == 0) {
-            cv::imwrite("img/" + std::to_string(lines_elapsed) + "_" + std::to_string(a.deviations_sum) + ".png", MToCV(a.result));
-            std::cout << lines_elapsed << std::endl;
-        }
-    }
-
-    worker_threads_ranges.clear();
-    for (auto &lock : worker_threads_locks) {
-        lock.Wake();
-    }
-    for (auto &th : worker_threads) {
-        th.join();
-    }
+    });
 
     return 0;
 }
