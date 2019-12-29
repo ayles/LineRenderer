@@ -19,6 +19,154 @@
 
 constexpr const double pi = 3.141592653589793238462643383279502884;
 
+struct TextureNode {
+    cv::Point origin; // Top left of the rectangle this node represents
+    cv::Size size;   // Size of the rectangle this node represents
+    bool empty;        // true if this node is a leaf and is filled
+
+    std::unique_ptr<TextureNode> left;  // Left (or top) subdivision
+    std::unique_ptr<TextureNode> right; // Right (or bottom) subdivision
+};
+
+TextureNode* pack(TextureNode* node, const cv::Size& size, cv::Size& textureSize) {
+    if (!node->empty) {
+        // The node is filled, not gonna fit anything else here
+        assert(!node->left && !node->right);
+        return NULL;
+    } else if (node->left && node->right) {
+        // Non-leaf, try inserting to the left and then to the right
+        TextureNode* retval = pack(node->left.get(), size);
+        if (retval != NULL) {
+            return retval;
+        }
+        return pack(node->right.get(), size);
+    } else {
+        // This is an unfilled leaf - let's see if we can fill it
+        cv::Point realSize(node->size.width, node->size.height);
+
+        // If we're along a boundary, calculate the actual size
+        if (node->origin.x + node->size.width == INT_MAX) {
+            realSize.x = textureSize.width - node->origin.x;
+        }
+        if (node->origin.y + node->size.height == INT_MAX) {
+            realSize.y = textureSize.height - node->origin.y;
+        }
+
+        if (node->size.width == size.width && node->size.height == size.height) {
+            // Perfect size - just pack into this node
+            node->empty = false;
+            return node;
+        } else if (realSize.x < size.width || realSize.y < size.height) {
+            // Not big enough
+            return NULL;
+        } else {
+            // Large enough - split until we get a perfect fit
+            TextureNode* left;
+            TextureNode* right;
+
+            // Determine how much space we'll have left if we split each way
+            int remainX = realSize.x - size.width;
+            int remainY = realSize.y - size.height;
+
+            // Split the way that will leave the most room
+            bool verticalSplit = remainX < remainY;
+            if (remainX == 0 && remainY == 0) {
+                // Edge case - we are are going to hit the border of
+                // the texture atlas perfectly, split at the border instead
+                if (node->size.width > node->size.height) {
+                    verticalSplit = false;
+                } else {
+                    verticalSplit = true;
+                }
+            }
+
+            if (verticalSplit) {
+                // Split vertically (left is top)
+                left = new TextureNode(node->origin, cv::Size(node->size.width, size.height);
+                right = new TextureNode(cv::Point(node->origin.x, node->origin.y + size.width),
+                                        cv:Size(node->size.width, node->size.height - size.height));
+            } else {
+                // Split horizontally
+                left = new TextureNode(node->origin, cv::Size(size.width, node->size.height);
+                right = new TextureNode(cv::Point(node->origin.x + size.width, node->origin.y), cv::Size_(node->size.width - size.width, node->size.height));
+            }
+
+            node->left = std::unique_ptr<TextureNode>(left);
+            node->right = std::unique_ptr<TextureNode>(right);
+            return pack(node->left.get(), size);
+        }
+    }
+}
+
+cv::Point packTexture(cv::Mat* textureBuffer, const cv::Size &  bufferSize, cv::Size& textureSize) {
+    TextureNode* node = pack(textureBuffer, bufferSize);
+    if (node == NULL)
+    {
+        this->resizeBuffer(cv::Size(textureSize.width * 2, textureSize.height * 2), textureSize);
+        node = pack(textureBuffer, bufferSize);
+
+        // Note: this assert will be hit if we try to pack a texture larger
+        // than the current size of the texture
+        assert(node != NULL);
+    }
+
+    assert(bufferSize.x == node->size.x);
+    assert(bufferSize.y == node->size.y);
+
+    // Copy the texture to the texture atlas' buffer
+    for (int ly = 0; ly < bufferSize.height; ly++) {
+        for (int lx = 0; lx < bufferSize.width; lx++) {
+            int y = node->origin.y + ly;
+            int x = node->origin.x + lx;
+            this->buffer[y * textureSize.width + x] = textureBuffer[ly * bufferSize.width + lx];
+        }
+    }
+
+    return node->origin;
+}
+
+/*
+    size_t width = 0;
+    for (auto& m : mats) {
+        m = cvt(m);
+        width += m.cols;
+    }
+
+    cv::Mat mmm(mats[0].rows, width, mats[0].type());
+    size_t curr_width = 0;
+    for (auto& m : mats) {
+        m.copyTo(mmm(cv::Rect(curr_width, 0, m.cols, m.rows)));
+        curr_width += m.cols;
+    }
+*/
+
+/*void resizeBuffer(const cv::Point& newSize) {
+    std::vector<cv::Mat> newBuffer;
+    newBuffer.resize(newSize.y*newSize.x);
+    for (int y = 0; y < textureSize.y; y++) {
+        for (int x = 0; x < textureSize.x; x++) {
+            newBuffer[y * newSize.x + x] = buffer[y * textureSize.x + x];
+        }
+    }
+
+    textureSize = newSize;
+    buffer = std::move(newBuffer);
+}*/
+
+void resizeBuffer(const cv::Size& newSize, cv::Size& textureSize) {
+    std::vector<cv::Mat> newBuffer;
+    newBuffer.resize(newSize.height * newSize.width);
+    size_t curr_width = 0;
+    size_t curr_height = 0;
+    for (auto& m : mats) {
+        mmm(cv::Rect(curr_width, curr_height, m.cols, m.rows));
+        curr_width += m.cols;
+        curr_height += m.rows;
+    }
+
+    textureSize = newSize;
+    buffer = std::move(newBuffer);
+
 class A {
 public:
     cv::Mat image;
@@ -320,10 +468,10 @@ cv::Mat combine(std::vector<cv::Mat> mats) {
         // Use cv::cvtColor to convert RGB to grayscale and m.depth(), m.channels() to check is it should be converted or its already ok
         m.convertTo(r, CV_64FC1);
         // Do not resize and just pack it as is
-        cv::resize(r, r, cv::Size(256, 256), 0, 0, cv::InterpolationFlags::INTER_NEAREST);
+        //cv::resize(r, r, cv::Size(256, 256), 0, 0, cv::InterpolationFlags::INTER_NEAREST);
         return r;
     };
-
+/*
     size_t width = 0;
     for (auto& m : mats) {
         m = cvt(m);
@@ -336,6 +484,14 @@ cv::Mat combine(std::vector<cv::Mat> mats) {
         m.copyTo(mmm(cv::Rect(curr_width, 0, m.cols, m.rows)));
         curr_width += m.cols;
     }
+*/
+
+    size_t width = 0;
+    for (auto& m : mats) {
+        m = cvt(m);
+        m = packTexture(m);
+    }
+
 
     return mmm;
 }
