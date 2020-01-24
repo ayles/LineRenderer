@@ -27,7 +27,7 @@ struct TextureNode {
     std::unique_ptr<TextureNode> left;  // Left (or top) subdivision
     std::unique_ptr<TextureNode> right; // Right (or bottom) subdivision
 };
-
+/*
 TextureNode* pack(TextureNode* node, const cv::Size& size, cv::Size& textureSize) {
     if (!node->empty) {
         // The node is filled, not gonna fit anything else here
@@ -124,7 +124,7 @@ cv::Point packTexture(cv::Mat* textureBuffer, const cv::Size &  bufferSize, cv::
 
     return node->origin;
 }
-
+*/
 /*
     size_t width = 0;
     for (auto& m : mats) {
@@ -152,7 +152,7 @@ cv::Point packTexture(cv::Mat* textureBuffer, const cv::Size &  bufferSize, cv::
     textureSize = newSize;
     buffer = std::move(newBuffer);
 }*/
-
+/*
 void resizeBuffer(const cv::Size& newSize, cv::Size& textureSize) {
     std::vector<cv::Mat> newBuffer;
     newBuffer.resize(newSize.height * newSize.width);
@@ -166,7 +166,7 @@ void resizeBuffer(const cv::Size& newSize, cv::Size& textureSize) {
 
     textureSize = newSize;
     buffer = std::move(newBuffer);
-
+*/
 class A {
 public:
     cv::Mat image;
@@ -309,7 +309,7 @@ public:
         struct LineExt {
             lr::Line line;
             double deviation;
-            cv::Vec3b color;
+            cv::Vec3d color;
 
             bool operator<(const LineExt& other) const {
                 if (deviation != other.deviation) return deviation < other.deviation;
@@ -460,7 +460,7 @@ std::list<lr::Line> GenerateLinesSimple(const cv::Point &center, double radius, 
     }
     return lines;
 }
-
+/*
 cv::Mat combine(std::vector<cv::Mat> mats) {
     auto cvt = [](const cv::Mat& m) {
         cv::Mat r;
@@ -471,7 +471,7 @@ cv::Mat combine(std::vector<cv::Mat> mats) {
         //cv::resize(r, r, cv::Size(256, 256), 0, 0, cv::InterpolationFlags::INTER_NEAREST);
         return r;
     };
-/*
+
     size_t width = 0;
     for (auto& m : mats) {
         m = cvt(m);
@@ -484,7 +484,6 @@ cv::Mat combine(std::vector<cv::Mat> mats) {
         m.copyTo(mmm(cv::Rect(curr_width, 0, m.cols, m.rows)));
         curr_width += m.cols;
     }
-*/
 
     size_t width = 0;
     for (auto& m : mats) {
@@ -495,9 +494,9 @@ cv::Mat combine(std::vector<cv::Mat> mats) {
 
     return mmm;
 }
-
+*/
 int main() {
-    cv::Mat src = cv::imread("monro_orig.jpg", cv::ImreadModes::IMREAD_COLOR);
+    cv::Mat src = cv::imread("mona2.png", cv::ImreadModes::IMREAD_COLOR);
 
     int dwn_width = 128;
     int dwn_height = 128;
@@ -508,7 +507,7 @@ int main() {
     A a(src, dwn_width, dwn_height, width, height);
 
     auto lines = GenerateLinesRandom(cv::Point(width / 2, height / 2), width * 0.45, 200);
-    auto colors = std::vector<cv::Vec3d> { lr::Color::FromWeb("ffffff"), lr::Color::FromWeb("000000"), //"f6beb6", "d9ac75", "cd5459", "3d5e99", "7c902d",
+    auto colors = std::vector<cv::Vec3d> { lr::Color::FromWeb("ffffff"), lr::Color::FromWeb("000000"), lr::Color::FromWeb("EFA636"), lr::Color::FromWeb("6A2C15"), lr::Color::FromWeb("798032") //"f6beb6", "d9ac75", "cd5459", "3d5e99", "7c902d",
                                  //"ff2c36", "ffc5bd", "ef972f", "3066ef", "3bb70b"
     };
 
@@ -516,8 +515,9 @@ int main() {
 
     a.Generate(lines, colors, [](const A& a, size_t n) {
         if (n % 5 == 0) {
-            cv::Mat m = a.result;
-
+            cv::Mat m;
+            a.result.convertTo(m, CV_8UC3, 255.0);
+            cv::cvtColor(m, m, cv::ColorConversionCodes::COLOR_RGB2BGR);
             if (n % 50 == 0) {
                 cv::imwrite("img/" + std::to_string(n) + "_" + std::to_string(a.deviations_sum) + ".png", m);
                 std::cout << n << std::endl;
@@ -529,10 +529,10 @@ int main() {
             // a.result and a.result_downscaled rgb matrices and so on
             // combine should combine passed matrices and return one big matrix containing all them packed
             // before combining they should all be converted from grayscale to rgb (if needed)
-            cv::imshow("w", combine({ a.details_dwn, a.deviations_dwn }));
+            //cv::imshow("w", combine({ a.details_dwn, a.deviations_dwn }));
             // this line is for realtime drawing process debug
             // cv::imshow("w", a.result);
-            cv::waitKey(1);
+            //cv::waitKey(1);
         }
     });
 
